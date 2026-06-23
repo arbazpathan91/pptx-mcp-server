@@ -945,10 +945,48 @@ TOOL_REGISTRY = {
     },
     "create_presentation": {
         "description": (
-            "Generate a high-quality PowerPoint (.pptx) file. "
-            "Provide title, subject, and theme_id. Slides are auto-generated if not provided. "
-            "theme_id options: midnight_executive, coral_energy, forest_calm, "
-            "teal_trust, charcoal_minimal, berry_cream."
+            "Generate a high-quality PowerPoint (.pptx) file with REAL content you write yourself.\n\n"
+            "IMPORTANT: Do NOT call this tool with just a title and subject. "
+            "You must first think about the topic, research what you know, and write real slide content. "
+            "Then call this tool with a full slides array containing genuine facts, insights, and details.\n\n"
+            "STEP 1 — Plan your slides (do this in your head before calling):\n"
+            "  - What are the key facts about this topic?\n"
+            "  - What stats or numbers are relevant?\n"
+            "  - What are the 3 most important points?\n"
+            "  - What comparisons or timelines make sense?\n\n"
+            "STEP 2 — Call this tool with a slides array you wrote yourself.\n\n"
+            "LAYOUTS AVAILABLE and when to use them:\n"
+            "  title_slide      — Opening slide. Fields: title, subtitle, tagline\n"
+            "  stat_callout     — 2-4 big numbers/stats. Fields: title, stats:[{value,label,delta}]\n"
+            "  icon_trio        — 3 equal points. Fields: title, items:[{heading,body}] (exactly 3)\n"
+            "  two_column       — Compare two things. Fields: title, left_heading, left_body, right_heading, right_body\n"
+            "  bullet_list      — 3-5 bullet points. Fields: title, bullets:[strings] (max 5)\n"
+            "  timeline         — Process or history. Fields: title, steps:[{label,text}] (max 5)\n"
+            "  comparison       — A vs B. Fields: title, left_heading, left_points:[str], right_heading, right_points:[str]\n"
+            "  quote_highlight  — Impactful quote. Fields: quote, attribution\n"
+            "  chart_slide      — Data chart. Fields: title, chart_type(bar/line/pie), chart_data:{series_name,labels:[],values:[]}\n"
+            "  text_body        — Paragraph text. Fields: title, body, note\n"
+            "  section_divider  — Section break. Fields: number, title, caption\n"
+            "  thank_you        — Closing slide. Fields: message, contact, website\n\n"
+            "THEME IDs: midnight_executive, coral_energy, forest_calm, teal_trust, charcoal_minimal, berry_cream\n\n"
+            "EXAMPLE — for topic British Shorthair Cats:\n"
+            "  slides: [\n"
+            "    {layout:title_slide, title:British Shorthair Cats, subtitle:Traits Temperament and Care},\n"
+            "    {layout:stat_callout, title:By the Numbers, stats:[\n"
+            "      {value:15yr, label:Average lifespan, delta:Up to 20 with good care},\n"
+            "      {value:9kg, label:Max adult male weight, delta:''},\n"
+            "      {value:1871, label:First shown Crystal Palace, delta:One of oldest breeds},\n"
+            "      {value:100+, label:Colour variants, delta:Blue most popular}]},\n"
+            "    {layout:icon_trio, title:Key Traits, items:[\n"
+            "      {heading:Calm Temperament, body:Placid and quiet. Never demanding or vocal. Suits busy households.},\n"
+            "      {heading:Dense Plush Coat, body:Thick double coat in over 100 colours. Low maintenance grooming.},\n"
+            "      {heading:Stocky Build, body:Broad chest, round face, short thick legs. Males reach 7-9kg.}]},\n"
+            "    {layout:two_column, title:Living with a British Shorthair,\n"
+            "      left_heading:Pros, left_body:Independent and calm. Great with kids and other pets. Quiet. Low grooming needs. Adapts to flat living.,\n"
+            "      right_heading:Cons, right_body:Not a lap cat. Can be aloof with strangers. Prone to obesity. Expensive pedigree breed.},\n"
+            "    {layout:thank_you, message:The Perfect Companion, contact:Calm. Loyal. Beautiful., website:''}\n"
+            "  ]\n\n"
+            "Write content this detailed and specific for every presentation. Never use placeholder text."
         ),
         "inputSchema": {
             "type": "object",
@@ -957,10 +995,13 @@ TOOL_REGISTRY = {
                 "subject":  {"type": "string", "description": "Subject or topic"},
                 "theme_id": {"type": "string", "description": "Theme ID (default: midnight_executive)"},
                 "filename": {"type": "string", "description": "Output filename e.g. my_deck.pptx"},
-                "slides":   {"type": "array",  "description": "Optional custom slides", "items": {"type": "object"}},
-                "spec":     {"type": "string", "description": "Optional full JSON spec string"},
+                "slides":   {
+                    "type": "array",
+                    "description": "Array of slide objects YOU wrote with real content. Required — do not omit.",
+                    "items": {"type": "object"}
+                },
             },
-            "required": ["title"]
+            "required": ["title", "slides"]
         },
         "fn": lambda args: _create_presentation_flexible(args),
     },
