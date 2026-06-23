@@ -1,1 +1,1 @@
-web: python pptx_mcp_server.py --transport sse --port $PORT
+web: python pptx_mcp_server.py
