@@ -864,14 +864,24 @@ def create_presentation(spec: str) -> str:
 
     size_kb = Path(output_path).stat().st_size // 1024
     n_slides = len(parsed["slides"])
-    return (
-        f"✅ Presentation created successfully!\n"
-        f"   File:   {output_path}\n"
-        f"   Slides: {n_slides}\n"
-        f"   Size:   {size_kb} KB\n"
-        f"   Theme:  {theme['label']}\n\n"
-        f"The file is ready for download or further editing in PowerPoint."
-    )
+    # Build a public download URL
+    base_url = os.environ.get("BASE_URL", "").rstrip("/")
+    fname = Path(output_path).name
+    if base_url:
+        download_url = f"{base_url}/download/{fname}"
+        return (
+            f"✅ Presentation created successfully!\n"
+            f"   Slides: {n_slides}  |  Size: {size_kb} KB  |  Theme: {theme['label']}\n\n"
+            f"📥 Download your file:\n{download_url}"
+        )
+    else:
+        return (
+            f"✅ Presentation created successfully!\n"
+            f"   File:   {output_path}\n"
+            f"   Slides: {n_slides}\n"
+            f"   Size:   {size_kb} KB\n"
+            f"   Theme:  {theme['label']}"
+        )
 
 
 # ─────────────────────────────────────────────
@@ -1212,12 +1222,43 @@ if __name__ == "__main__":
             }
         })
 
+    async def handle_download(request: Request):
+        """Serve generated pptx files for download."""
+        from starlette.responses import FileResponse
+        filename = request.path_params.get("filename", "")
+        # Sanitise — no path traversal
+        filename = Path(filename).name
+        file_path = OUTPUT_DIR / filename
+        if not file_path.exists() or not str(file_path).endswith(".pptx"):
+            return JSONResponse({"error": "File not found"}, status_code=404)
+        return FileResponse(
+            path=str(file_path),
+            filename=filename,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
+
+    async def list_files(request: Request):
+        """List available pptx files."""
+        files = []
+        base_url = os.environ.get("BASE_URL", "").rstrip("/")
+        for f in OUTPUT_DIR.glob("*.pptx"):
+            files.append({
+                "filename": f.name,
+                "size_kb": f.stat().st_size // 1024,
+                "download_url": f"{base_url}/download/{f.name}" if base_url else f"/download/{f.name}"
+            })
+        files.sort(key=lambda x: x["filename"])
+        return JSONResponse({"files": files})
+
+    from starlette.routing import Mount
     app = Starlette(routes=[
-        Route("/",         endpoint=health,             methods=["GET"]),
-        Route("/",         endpoint=handle_streamable,  methods=["POST"]),
-        Route("/mcp",      endpoint=handle_streamable,  methods=["POST"]),
-        Route("/health",   endpoint=health,             methods=["GET"]),
-        Route("/sse",      endpoint=handle_sse,         methods=["GET"]),
+        Route("/",              endpoint=health,            methods=["GET"]),
+        Route("/",              endpoint=handle_streamable, methods=["POST"]),
+        Route("/mcp",           endpoint=handle_streamable, methods=["POST"]),
+        Route("/health",        endpoint=health,            methods=["GET"]),
+        Route("/sse",           endpoint=handle_sse,        methods=["GET"]),
+        Route("/files",         endpoint=list_files,        methods=["GET"]),
+        Route("/download/{filename}", endpoint=handle_download, methods=["GET"]),
     ])
 
     uvicorn.run(app, host="0.0.0.0", port=port)
