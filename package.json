@@ -1,7 +1,8 @@
 {
   "name": "pptx-mcp-server",
   "version": "1.0.0",
+  "description": "PPTX MCP Server",
   "dependencies": {
-    "pptxgenjs": "^4.0.1"
+    "pptxgenjs": "4.0.1"
   }
 }
