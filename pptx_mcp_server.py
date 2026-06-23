@@ -870,19 +870,17 @@ if __name__ == "__main__":
     import uvicorn
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, Response
     from starlette.routing import Route, Mount
+    from starlette.requests import Request
 
     port = int(os.environ.get("PORT", 8000))
 
-    if "--port" in sys.argv:
-        i = sys.argv.index("--port")
-        port = int(sys.argv[i + 1])
+    sse_transport = SseServerTransport("/messages/")
 
-    sse = SseServerTransport("/messages/")
-
-    async def handle_sse(request):
-        async with sse.connect_sse(
+    async def handle_sse(request: Request):
+        """SSE transport - for Claude Desktop, older clients"""
+        async with sse_transport.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:
             await mcp._mcp_server.run(
@@ -890,15 +888,99 @@ if __name__ == "__main__":
                 mcp._mcp_server.create_initialization_options()
             )
 
-    async def health(request):
-        return JSONResponse({"status": "ok", "server": "pptx-mcp-server"})
+    async def handle_streamable(request: Request):
+        """Streamable HTTP transport - for Gemini, ChatGPT, newer clients"""
+        body = await request.body()
+        headers = dict(request.headers)
+
+        import json as _json
+        from mcp.types import JSONRPCMessage
+
+        try:
+            payload = _json.loads(body)
+        except Exception:
+            return Response("Bad Request", status_code=400)
+
+        # Handle initialize / ping / tools/list / tools/call
+        method = payload.get("method", "")
+        msg_id = payload.get("id", 1)
+
+        if method == "initialize":
+            result = {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "pptx-maker", "version": "1.0.0"}
+                }
+            }
+            return JSONResponse(result)
+
+        elif method == "notifications/initialized":
+            return Response(status_code=204)
+
+        elif method == "ping":
+            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {}})
+
+        elif method == "tools/list":
+            tools = []
+            for tool_name, tool_fn in mcp._tool_manager._tools.items():
+                tools.append({
+                    "name": tool_name,
+                    "description": tool_fn.description or "",
+                    "inputSchema": tool_fn.parameters or {"type": "object", "properties": {}}
+                })
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {"tools": tools}
+            })
+
+        elif method == "tools/call":
+            params = payload.get("params", {})
+            tool_name = params.get("name", "")
+            arguments = params.get("arguments", {})
+
+            try:
+                result = await mcp._tool_manager.call_tool(tool_name, arguments)
+                content = [{"type": "text", "text": str(result)}]
+                return JSONResponse({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"content": content, "isError": False}
+                })
+            except Exception as e:
+                return JSONResponse({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                        "isError": True
+                    }
+                })
+
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "error": {"code": -32601, "message": f"Method not found: {method}"}
+        })
+
+    async def health(request: Request):
+        return JSONResponse({
+            "status": "ok",
+            "server": "pptx-mcp-server",
+            "transport": ["sse (/sse)", "streamable-http (POST /)"]
+        })
 
     starlette_app = Starlette(
         routes=[
-            Route("/", endpoint=health),
-            Route("/health", endpoint=health),
-            Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
+            Route("/", endpoint=health, methods=["GET"]),
+            Route("/", endpoint=handle_streamable, methods=["POST"]),
+            Route("/health", endpoint=health, methods=["GET"]),
+            Route("/mcp", endpoint=handle_streamable, methods=["POST"]),
+            Route("/sse", endpoint=handle_sse, methods=["GET"]),
+            Mount("/messages/", app=sse_transport.handle_post_message),
         ]
     )
 
