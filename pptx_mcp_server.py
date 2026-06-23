@@ -864,22 +864,158 @@ def create_presentation(spec: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# Entry point
+# Tool registry — direct function calls, no FastMCP internals
+# ─────────────────────────────────────────────
 
+TOOL_REGISTRY = {
+    "list_themes": {
+        "description": "List all available brand themes with colours and fonts.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "fn": lambda args: list_themes(),
+    },
+    "list_slide_layouts": {
+        "description": "List all supported slide layout types with descriptions.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "fn": lambda args: list_slide_layouts(),
+    },
+    "preview_theme": {
+        "description": "Return the full colour and font spec for a given theme_id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "theme_id": {"type": "string", "description": "Theme ID from list_themes()"}
+            },
+            "required": ["theme_id"]
+        },
+        "fn": lambda args: preview_theme(args.get("theme_id", "")),
+    },
+    "create_presentation": {
+        "description": (
+            "Generate a high-quality PowerPoint (.pptx) file from a JSON spec. "
+            "The spec must be a JSON STRING with keys: title, theme_id, slides (array). "
+            "Each slide needs a 'layout' field. Available layouts: title_slide, section_divider, "
+            "two_column, icon_trio, stat_callout, text_body, bullet_list, quote_highlight, "
+            "timeline, comparison, chart_slide, thank_you, image_full. "
+            "Available theme_ids: midnight_executive, coral_energy, forest_calm, "
+            "teal_trust, charcoal_minimal, berry_cream. "
+            "Example spec: {\"title\":\"My Deck\",\"theme_id\":\"midnight_executive\","
+            "\"filename\":\"deck.pptx\",\"slides\":["
+            "{\"layout\":\"title_slide\",\"title\":\"Hello\",\"subtitle\":\"World\"},"
+            "{\"layout\":\"thank_you\",\"message\":\"Thanks!\"}]}"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "spec": {
+                    "type": "string",
+                    "description": "JSON string with title, theme_id, filename, and slides array"
+                }
+            },
+            "required": ["spec"]
+        },
+        "fn": lambda args: create_presentation(args.get("spec", "{}")),
+    },
+}
+
+
+# ─────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    from mcp.server.sse import SseServerTransport
+    import asyncio
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse, Response
-    from starlette.routing import Route, Mount
+    from starlette.routing import Route
     from starlette.requests import Request
+    from mcp.server.sse import SseServerTransport
 
     port = int(os.environ.get("PORT", 8000))
 
+    def make_tools_list():
+        return [
+            {
+                "name": name,
+                "description": info["description"],
+                "inputSchema": info["inputSchema"],
+            }
+            for name, info in TOOL_REGISTRY.items()
+        ]
+
+    async def call_tool(name: str, arguments: dict) -> str:
+        info = TOOL_REGISTRY.get(name)
+        if not info:
+            raise ValueError(f"Unknown tool: {name}")
+        fn = info["fn"]
+        # support both sync and async tool functions
+        if asyncio.iscoroutinefunction(fn):
+            return await fn(arguments)
+        return fn(arguments)
+
+    async def handle_streamable(request: Request):
+        """Handles POST / — streamable HTTP MCP transport (Gemini, newer clients)."""
+        try:
+            body = await request.body()
+            payload = json.loads(body)
+        except Exception:
+            return Response("Bad Request", status_code=400)
+
+        method  = payload.get("method", "")
+        msg_id  = payload.get("id", 1)
+        params  = payload.get("params", {})
+
+        if method == "initialize":
+            return JSONResponse({
+                "jsonrpc": "2.0", "id": msg_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "pptx-maker", "version": "1.0.0"}
+                }
+            })
+
+        elif method in ("notifications/initialized", "initialized"):
+            return Response(status_code=204)
+
+        elif method == "ping":
+            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {}})
+
+        elif method == "tools/list":
+            return JSONResponse({
+                "jsonrpc": "2.0", "id": msg_id,
+                "result": {"tools": make_tools_list()}
+            })
+
+        elif method == "tools/call":
+            tool_name = params.get("name", "")
+            arguments = params.get("arguments", {})
+            try:
+                result_text = await call_tool(tool_name, arguments)
+                return JSONResponse({
+                    "jsonrpc": "2.0", "id": msg_id,
+                    "result": {
+                        "content": [{"type": "text", "text": str(result_text)}],
+                        "isError": False
+                    }
+                })
+            except Exception as e:
+                return JSONResponse({
+                    "jsonrpc": "2.0", "id": msg_id,
+                    "result": {
+                        "content": [{"type": "text", "text": f"Error: {e}"}],
+                        "isError": True
+                    }
+                })
+
+        return JSONResponse({
+            "jsonrpc": "2.0", "id": msg_id,
+            "error": {"code": -32601, "message": f"Method not found: {method}"}
+        })
+
+    # SSE transport for Claude Desktop
     sse_transport = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request):
-        """SSE transport - for Claude Desktop, older clients"""
         async with sse_transport.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:
@@ -888,100 +1024,23 @@ if __name__ == "__main__":
                 mcp._mcp_server.create_initialization_options()
             )
 
-    async def handle_streamable(request: Request):
-        """Streamable HTTP transport - for Gemini, ChatGPT, newer clients"""
-        body = await request.body()
-        headers = dict(request.headers)
-
-        import json as _json
-        from mcp.types import JSONRPCMessage
-
-        try:
-            payload = _json.loads(body)
-        except Exception:
-            return Response("Bad Request", status_code=400)
-
-        # Handle initialize / ping / tools/list / tools/call
-        method = payload.get("method", "")
-        msg_id = payload.get("id", 1)
-
-        if method == "initialize":
-            result = {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "pptx-maker", "version": "1.0.0"}
-                }
-            }
-            return JSONResponse(result)
-
-        elif method == "notifications/initialized":
-            return Response(status_code=204)
-
-        elif method == "ping":
-            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {}})
-
-        elif method == "tools/list":
-            tools = []
-            for tool_name, tool_fn in mcp._tool_manager._tools.items():
-                tools.append({
-                    "name": tool_name,
-                    "description": tool_fn.description or "",
-                    "inputSchema": tool_fn.parameters or {"type": "object", "properties": {}}
-                })
-            return JSONResponse({
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "result": {"tools": tools}
-            })
-
-        elif method == "tools/call":
-            params = payload.get("params", {})
-            tool_name = params.get("name", "")
-            arguments = params.get("arguments", {})
-
-            try:
-                result = await mcp._tool_manager.call_tool(tool_name, arguments)
-                content = [{"type": "text", "text": str(result)}]
-                return JSONResponse({
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {"content": content, "isError": False}
-                })
-            except Exception as e:
-                return JSONResponse({
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {
-                        "content": [{"type": "text", "text": f"Error: {str(e)}"}],
-                        "isError": True
-                    }
-                })
-
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "error": {"code": -32601, "message": f"Method not found: {method}"}
-        })
-
     async def health(request: Request):
         return JSONResponse({
             "status": "ok",
-            "server": "pptx-mcp-server",
-            "transport": ["sse (/sse)", "streamable-http (POST /)"]
+            "server": "pptx-maker",
+            "tools": list(TOOL_REGISTRY.keys()),
+            "endpoints": {
+                "streamable_http": "POST /",
+                "sse": "GET /sse",
+            }
         })
 
-    starlette_app = Starlette(
-        routes=[
-            Route("/", endpoint=health, methods=["GET"]),
-            Route("/", endpoint=handle_streamable, methods=["POST"]),
-            Route("/health", endpoint=health, methods=["GET"]),
-            Route("/mcp", endpoint=handle_streamable, methods=["POST"]),
-            Route("/sse", endpoint=handle_sse, methods=["GET"]),
-            Mount("/messages/", app=sse_transport.handle_post_message),
-        ]
-    )
+    app = Starlette(routes=[
+        Route("/",         endpoint=health,             methods=["GET"]),
+        Route("/",         endpoint=handle_streamable,  methods=["POST"]),
+        Route("/mcp",      endpoint=handle_streamable,  methods=["POST"]),
+        Route("/health",   endpoint=health,             methods=["GET"]),
+        Route("/sse",      endpoint=handle_sse,         methods=["GET"]),
+    ])
 
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
