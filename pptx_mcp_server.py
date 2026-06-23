@@ -155,7 +155,18 @@ def _build_js(spec: dict, theme: dict, output_path: str) -> str:
     slides_block = "\n\n  ".join(slides_js)
 
     return textwrap.dedent(f"""
-        const pptxgen = require('pptxgenjs');
+        // Try multiple paths for pptxgenjs (handles global + local installs)
+        let pptxgen;
+        const pptxPaths = [
+            'pptxgenjs',
+            '/opt/render/project/src/node_modules/pptxgenjs',
+            process.cwd() + '/node_modules/pptxgenjs',
+            __dirname + '/node_modules/pptxgenjs',
+        ];
+        for (const p of pptxPaths) {
+            try { pptxgen = require(p); break; } catch(e) {}
+        }
+        if (!pptxgen) throw new Error('pptxgenjs not found. Run: npm install pptxgenjs');
         const pres = new pptxgen();
         pres.layout = 'LAYOUT_16x9';
         pres.title   = {json.dumps(spec.get('title', 'Presentation'))};
@@ -893,7 +904,87 @@ def _auto_slides(title, subject):
         {"layout": "thank_you", "message": "Thank You", "contact": "", "website": ""},
     ]
 
+def _repair_slides(slides_raw):
+    """
+    Best-effort repair of a slides value that may be:
+    - a proper list of dicts  (ideal)
+    - a JSON string           (parse it)
+    - a mangled/partial list  (salvage what we can)
+    """
+    import re
+
+    if isinstance(slides_raw, list):
+        # Filter out any non-dict items and fix common field issues
+        repaired = []
+        for s in slides_raw:
+            if not isinstance(s, dict):
+                continue
+            # Fix layout field — strip duplicates like "title_slide_slide"
+            if "layout" in s:
+                layout = str(s["layout"])
+                layout = re.sub(r'(title_slide)_slide', r'\1', layout)
+                layout = re.sub(r'(stat_callout)_callout', r'\1', layout)
+                layout = re.sub(r'^layout:', '', layout).strip()
+                s["layout"] = layout
+            # Drop any keys that are empty strings
+            s = {k: v for k, v in s.items() if v != "" or k == "layout"}
+            # Fix stats — ensure each stat has value/label
+            if "stats" in s and isinstance(s["stats"], list):
+                fixed_stats = []
+                for st in s["stats"]:
+                    if isinstance(st, dict) and ("value" in st or "label" in st):
+                        fixed_stats.append({
+                            "value": str(st.get("value", "—")),
+                            "label": str(st.get("label", "")),
+                            "delta": str(st.get("delta", "")),
+                        })
+                s["stats"] = fixed_stats[:4]
+            # Fix items (icon_trio)
+            if "items" in s and isinstance(s["items"], list):
+                s["items"] = [
+                    {"heading": str(it.get("heading",""))[:40],
+                     "body": str(it.get("body",""))}
+                    for it in s["items"] if isinstance(it, dict)
+                ][:3]
+            # Fix steps (timeline)
+            if "steps" in s and isinstance(s["steps"], list):
+                s["steps"] = [
+                    {"label": str(st.get("label",""))[:20],
+                     "text": str(st.get("text",""))}
+                    for st in s["steps"] if isinstance(st, dict)
+                ][:5]
+            # Fix bullets
+            if "bullets" in s and isinstance(s["bullets"], list):
+                s["bullets"] = [str(b) for b in s["bullets"] if b][:5]
+            repaired.append(s)
+        return repaired if repaired else None
+
+    if isinstance(slides_raw, str):
+        try:
+            parsed = json.loads(slides_raw)
+            if isinstance(parsed, list):
+                return _repair_slides(parsed)
+        except Exception:
+            pass
+        # Try to extract JSON array from the string
+        m = re.search(r'\[.*\]', slides_raw, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group())
+                return _repair_slides(parsed)
+            except Exception:
+                pass
+
+    return None
+
+
 def _create_presentation_flexible(args):
+    """
+    Accepts either:
+      - flat fields: title, subject, theme_id, filename, slides
+      - a spec JSON string (legacy)
+      - or any mix — always produces a valid deck
+    """
     if "spec" in args and isinstance(args["spec"], str):
         try:
             parsed = json.loads(args["spec"])
@@ -908,13 +999,21 @@ def _create_presentation_flexible(args):
     title    = parsed.get("title") or "Presentation"
     subject  = parsed.get("subject") or parsed.get("topic") or title
     theme_id = parsed.get("theme_id", "midnight_executive")
-    filename = parsed.get("filename") or (title.lower().replace(" ","_") + ".pptx")
-    slides   = parsed.get("slides") or _auto_slides(title, subject)
+    filename = parsed.get("filename") or (title.lower().replace(" ","_")[:40] + ".pptx")
+
+    # Repair slides
+    raw_slides = parsed.get("slides")
+    slides = _repair_slides(raw_slides) if raw_slides else None
+
+    # Fall back to auto-generated slides if repair failed
+    if not slides:
+        slides = _auto_slides(title, subject)
 
     return create_presentation(json.dumps({
         "title": title, "subject": subject,
         "theme_id": theme_id, "filename": filename, "slides": slides,
     }))
+
 
 
 # ─────────────────────────────────────────────
@@ -945,61 +1044,49 @@ TOOL_REGISTRY = {
     },
     "create_presentation": {
         "description": (
-            "Generate a high-quality PowerPoint (.pptx) file with REAL content you write yourself.\n\n"
-            "IMPORTANT: Do NOT call this tool with just a title and subject. "
-            "You must first think about the topic, research what you know, and write real slide content. "
-            "Then call this tool with a full slides array containing genuine facts, insights, and details.\n\n"
-            "STEP 1 — Plan your slides (do this in your head before calling):\n"
-            "  - What are the key facts about this topic?\n"
-            "  - What stats or numbers are relevant?\n"
-            "  - What are the 3 most important points?\n"
-            "  - What comparisons or timelines make sense?\n\n"
-            "STEP 2 — Call this tool with a slides array you wrote yourself.\n\n"
-            "LAYOUTS AVAILABLE and when to use them:\n"
-            "  title_slide      — Opening slide. Fields: title, subtitle, tagline\n"
-            "  stat_callout     — 2-4 big numbers/stats. Fields: title, stats:[{value,label,delta}]\n"
-            "  icon_trio        — 3 equal points. Fields: title, items:[{heading,body}] (exactly 3)\n"
-            "  two_column       — Compare two things. Fields: title, left_heading, left_body, right_heading, right_body\n"
-            "  bullet_list      — 3-5 bullet points. Fields: title, bullets:[strings] (max 5)\n"
-            "  timeline         — Process or history. Fields: title, steps:[{label,text}] (max 5)\n"
-            "  comparison       — A vs B. Fields: title, left_heading, left_points:[str], right_heading, right_points:[str]\n"
-            "  quote_highlight  — Impactful quote. Fields: quote, attribution\n"
-            "  chart_slide      — Data chart. Fields: title, chart_type(bar/line/pie), chart_data:{series_name,labels:[],values:[]}\n"
-            "  text_body        — Paragraph text. Fields: title, body, note\n"
-            "  section_divider  — Section break. Fields: number, title, caption\n"
-            "  thank_you        — Closing slide. Fields: message, contact, website\n\n"
-            "THEME IDs: midnight_executive, coral_energy, forest_calm, teal_trust, charcoal_minimal, berry_cream\n\n"
-            "EXAMPLE — for topic British Shorthair Cats:\n"
-            "  slides: [\n"
-            "    {layout:title_slide, title:British Shorthair Cats, subtitle:Traits Temperament and Care},\n"
-            "    {layout:stat_callout, title:By the Numbers, stats:[\n"
-            "      {value:15yr, label:Average lifespan, delta:Up to 20 with good care},\n"
-            "      {value:9kg, label:Max adult male weight, delta:''},\n"
-            "      {value:1871, label:First shown Crystal Palace, delta:One of oldest breeds},\n"
-            "      {value:100+, label:Colour variants, delta:Blue most popular}]},\n"
-            "    {layout:icon_trio, title:Key Traits, items:[\n"
-            "      {heading:Calm Temperament, body:Placid and quiet. Never demanding or vocal. Suits busy households.},\n"
-            "      {heading:Dense Plush Coat, body:Thick double coat in over 100 colours. Low maintenance grooming.},\n"
-            "      {heading:Stocky Build, body:Broad chest, round face, short thick legs. Males reach 7-9kg.}]},\n"
-            "    {layout:two_column, title:Living with a British Shorthair,\n"
-            "      left_heading:Pros, left_body:Independent and calm. Great with kids and other pets. Quiet. Low grooming needs. Adapts to flat living.,\n"
-            "      right_heading:Cons, right_body:Not a lap cat. Can be aloof with strangers. Prone to obesity. Expensive pedigree breed.},\n"
-            "    {layout:thank_you, message:The Perfect Companion, contact:Calm. Loyal. Beautiful., website:''}\n"
-            "  ]\n\n"
-            "Write content this detailed and specific for every presentation. Never use placeholder text."
+            "Generate a high-quality PowerPoint (.pptx) file. "
+            "You MUST write real slide content based on your knowledge of the topic before calling this tool.\n\n"
+            "RULES:\n"
+            "1. Write real facts — no placeholder text like \'Overview of topic\'\n"
+            "2. Use simple valid JSON — no comments, no trailing commas, all strings quoted\n"
+            "3. Pick the best layout for each slide\'s content\n"
+            "4. Include 5-7 slides minimum\n\n"
+            "LAYOUTS:\n"
+            "title_slide: {layout, title, subtitle, tagline}\n"
+            "stat_callout: {layout, title, stats:[{value:string, label:string, delta:string}]} — max 4 stats\n"
+            "icon_trio: {layout, title, items:[{heading:string, body:string}]} — exactly 3 items\n"
+            "two_column: {layout, title, left_heading, left_body, right_heading, right_body}\n"
+            "bullet_list: {layout, title, bullets:[string,string,string]} — max 5 bullets\n"
+            "timeline: {layout, title, steps:[{label:string, text:string}]} — max 5 steps\n"
+            "comparison: {layout, title, left_heading, left_points:[strings], right_heading, right_points:[strings]}\n"
+            "quote_highlight: {layout, quote:string, attribution:string}\n"
+            "chart_slide: {layout, title, chart_type:bar|line|pie, chart_data:{series_name, labels:[strings], values:[numbers]}}\n"
+            "thank_you: {layout, message, contact, website}\n\n"
+            "THEMES: midnight_executive, coral_energy, forest_calm, teal_trust, charcoal_minimal, berry_cream\n\n"
+            "EXAMPLE for \'British Shorthair Cats\':\n"
+            "slides: ["
+            "{{\"layout\":\"title_slide\",\"title\":\"British Shorthair Cats\",\"subtitle\":\"Traits and Temperament\"}},"
+            "{{\"layout\":\"stat_callout\",\"title\":\"Key Facts\",\"stats\":["
+            "{{\"value\":\"15yr\",\"label\":\"Average lifespan\",\"delta\":\"Up to 20\"}},"
+            "{{\"value\":\"9kg\",\"label\":\"Max adult weight\",\"delta\":\"\"}},"
+            "{{\"value\":\"1871\",\"label\":\"First cat show\",\"delta\":\"Crystal Palace\"}}]}},"
+            "{{\"layout\":\"icon_trio\",\"title\":\"Key Traits\",\"items\":["
+            "{{\"heading\":\"Calm\",\"body\":\"Placid and quiet. Never demanding.\"}},"
+            "{{\"heading\":\"Dense Coat\",\"body\":\"Thick plush double coat in 100+ colours.\"}},"
+            "{{\"heading\":\"Stocky\",\"body\":\"Broad chest, round face. Males reach 9kg.\"}}]}},"
+            "{{\"layout\":\"two_column\",\"title\":\"Pros and Cons\"," 
+            "\"left_heading\":\"Pros\",\"left_body\":\"Calm with kids. Low grooming. Suits flats.\"," 
+            "\"right_heading\":\"Cons\",\"right_body\":\"Not a lap cat. Prone to obesity.\"}},"
+            "{{\"layout\":\"thank_you\",\"message\":\"The Perfect Companion\"}}]"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "title":    {"type": "string", "description": "Title of the presentation"},
-                "subject":  {"type": "string", "description": "Subject or topic"},
-                "theme_id": {"type": "string", "description": "Theme ID (default: midnight_executive)"},
-                "filename": {"type": "string", "description": "Output filename e.g. my_deck.pptx"},
-                "slides":   {
-                    "type": "array",
-                    "description": "Array of slide objects YOU wrote with real content. Required — do not omit.",
-                    "items": {"type": "object"}
-                },
+                "title":    {"type": "string",  "description": "Title of the presentation"},
+                "subject":  {"type": "string",  "description": "Subject or topic"},
+                "theme_id": {"type": "string",  "description": "Theme ID (default: midnight_executive)"},
+                "filename": {"type": "string",  "description": "Output filename e.g. my_deck.pptx"},
+                "slides":   {"type": "array",   "description": "Array of slide objects with real content you wrote", "items": {"type": "object"}},
             },
             "required": ["title", "slides"]
         },
