@@ -867,8 +867,13 @@ def create_presentation(spec: str) -> str:
 # Entry point
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
+    import uvicorn
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+
     transport = "stdio"
-    port      = 8000
+    port = int(os.environ.get("PORT", 8000))
 
     if "--transport" in sys.argv:
         i = sys.argv.index("--transport")
@@ -878,6 +883,23 @@ if __name__ == "__main__":
         port = int(sys.argv[i + 1])
 
     if transport == "sse":
-        mcp.run(transport="sse", port=port)
+        sse = SseServerTransport("/messages/")
+
+        async def handle_sse(request):
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await mcp._mcp_server.run(
+                    streams[0], streams[1],
+                    mcp._mcp_server.create_initialization_options()
+                )
+
+        starlette_app = Starlette(
+            routes=[
+                Route("/sse", endpoint=handle_sse),
+                Mount("/messages/", app=sse.handle_post_message),
+            ]
+        )
+        uvicorn.run(starlette_app, host="0.0.0.0", port=port)
     else:
         mcp.run(transport="stdio")
