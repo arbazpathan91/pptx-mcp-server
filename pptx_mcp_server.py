@@ -155,18 +155,7 @@ def _build_js(spec: dict, theme: dict, output_path: str) -> str:
     slides_block = "\n\n  ".join(slides_js)
 
     return textwrap.dedent(f"""
-        // Try multiple paths for pptxgenjs (handles global + local installs)
-        let pptxgen;
-        const pptxPaths = [
-            'pptxgenjs',
-            '/opt/render/project/src/node_modules/pptxgenjs',
-            process.cwd() + '/node_modules/pptxgenjs',
-            __dirname + '/node_modules/pptxgenjs',
-        ];
-        for (const p of pptxPaths) {
-            try { pptxgen = require(p); break; } catch(e) {}
-        }
-        if (!pptxgen) throw new Error('pptxgenjs not found. Run: npm install pptxgenjs');
+        const pptxgen = require(process.env.PPTXGEN_PATH || 'pptxgenjs');
         const pres = new pptxgen();
         pres.layout = 'LAYOUT_16x9';
         pres.title   = {json.dumps(spec.get('title', 'Presentation'))};
@@ -693,9 +682,20 @@ def _run_js(js_code: str, output_path: str) -> str:
         f.write(js_code)
         tmp_js = f.name
     try:
+        import shutil
+        node_modules_path = str(Path(__file__).parent / "node_modules" / "pptxgenjs")
+        render_path = "/opt/render/project/src/node_modules/pptxgenjs"
+        if Path(render_path).exists():
+            pptxgen_path = render_path
+        elif Path(node_modules_path).exists():
+            pptxgen_path = node_modules_path
+        else:
+            pptxgen_path = "pptxgenjs"  # fallback to global
+        env = os.environ.copy()
+        env["PPTXGEN_PATH"] = pptxgen_path
         result = subprocess.run(
             ["node", tmp_js],
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=60, env=env
         )
         if result.returncode != 0:
             raise RuntimeError(f"Node error: {result.stderr.strip()}")
