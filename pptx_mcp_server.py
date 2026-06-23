@@ -864,6 +864,60 @@ def create_presentation(spec: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# Auto slide generator
+# ─────────────────────────────────────────────
+
+def _auto_slides(title, subject):
+    return [
+        {"layout": "title_slide", "title": title, "subtitle": subject, "tagline": ""},
+        {"layout": "icon_trio", "title": f"Key Aspects of {title}", "items": [
+            {"heading": "Overview",   "body": f"Core concepts of {subject}."},
+            {"heading": "Key Points", "body": f"Important facts about {title}."},
+            {"heading": "Takeaways",  "body": f"What to remember about {subject}."},
+        ]},
+        {"layout": "two_column",
+         "title": "Details",
+         "left_heading": "Background",
+         "left_body": f"{title} covers {subject}. Understanding fundamentals is essential.",
+         "right_heading": "Significance",
+         "right_body": f"The importance of {subject} shapes our understanding and approach."},
+        {"layout": "bullet_list",
+         "title": "Summary Points",
+         "bullets": [
+             f"{title} — core concept overview",
+             f"Key characteristics of {subject}",
+             "Practical applications and relevance",
+             "Important considerations",
+             "Next steps and recommendations",
+         ]},
+        {"layout": "thank_you", "message": "Thank You", "contact": "", "website": ""},
+    ]
+
+def _create_presentation_flexible(args):
+    if "spec" in args and isinstance(args["spec"], str):
+        try:
+            parsed = json.loads(args["spec"])
+        except Exception:
+            parsed = {}
+        for k in ("title","subject","theme_id","filename","slides"):
+            if k in args and k not in parsed:
+                parsed[k] = args[k]
+    else:
+        parsed = dict(args)
+
+    title    = parsed.get("title") or "Presentation"
+    subject  = parsed.get("subject") or parsed.get("topic") or title
+    theme_id = parsed.get("theme_id", "midnight_executive")
+    filename = parsed.get("filename") or (title.lower().replace(" ","_") + ".pptx")
+    slides   = parsed.get("slides") or _auto_slides(title, subject)
+
+    return create_presentation(json.dumps({
+        "title": title, "subject": subject,
+        "theme_id": theme_id, "filename": filename, "slides": slides,
+    }))
+
+
+# ─────────────────────────────────────────────
 # Tool registry — direct function calls, no FastMCP internals
 # ─────────────────────────────────────────────
 
@@ -891,29 +945,24 @@ TOOL_REGISTRY = {
     },
     "create_presentation": {
         "description": (
-            "Generate a high-quality PowerPoint (.pptx) file from a JSON spec. "
-            "The spec must be a JSON STRING with keys: title, theme_id, slides (array). "
-            "Each slide needs a 'layout' field. Available layouts: title_slide, section_divider, "
-            "two_column, icon_trio, stat_callout, text_body, bullet_list, quote_highlight, "
-            "timeline, comparison, chart_slide, thank_you, image_full. "
-            "Available theme_ids: midnight_executive, coral_energy, forest_calm, "
-            "teal_trust, charcoal_minimal, berry_cream. "
-            "Example spec: {\"title\":\"My Deck\",\"theme_id\":\"midnight_executive\","
-            "\"filename\":\"deck.pptx\",\"slides\":["
-            "{\"layout\":\"title_slide\",\"title\":\"Hello\",\"subtitle\":\"World\"},"
-            "{\"layout\":\"thank_you\",\"message\":\"Thanks!\"}]}"
+            "Generate a high-quality PowerPoint (.pptx) file. "
+            "Provide title, subject, and theme_id. Slides are auto-generated if not provided. "
+            "theme_id options: midnight_executive, coral_energy, forest_calm, "
+            "teal_trust, charcoal_minimal, berry_cream."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "spec": {
-                    "type": "string",
-                    "description": "JSON string with title, theme_id, filename, and slides array"
-                }
+                "title":    {"type": "string", "description": "Title of the presentation"},
+                "subject":  {"type": "string", "description": "Subject or topic"},
+                "theme_id": {"type": "string", "description": "Theme ID (default: midnight_executive)"},
+                "filename": {"type": "string", "description": "Output filename e.g. my_deck.pptx"},
+                "slides":   {"type": "array",  "description": "Optional custom slides", "items": {"type": "object"}},
+                "spec":     {"type": "string", "description": "Optional full JSON spec string"},
             },
-            "required": ["spec"]
+            "required": ["title"]
         },
-        "fn": lambda args: create_presentation(args.get("spec", "{}")),
+        "fn": lambda args: _create_presentation_flexible(args),
     },
 }
 
