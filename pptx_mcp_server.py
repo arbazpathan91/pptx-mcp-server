@@ -992,9 +992,12 @@ def _create_presentation_flexible(args):
     """
     Accepts either:
       - flat fields: title, subject, theme_id, filename, slides
+      - slides as a JSON string (Gemma sometimes stringifies arrays)
       - a spec JSON string (legacy)
-      - or any mix — always produces a valid deck
     """
+    import logging
+    logger = logging.getLogger("pptx-mcp")
+
     if "spec" in args and isinstance(args["spec"], str):
         try:
             parsed = json.loads(args["spec"])
@@ -1011,12 +1014,30 @@ def _create_presentation_flexible(args):
     theme_id = parsed.get("theme_id", "midnight_executive")
     filename = parsed.get("filename") or (title.lower().replace(" ","_")[:40] + ".pptx")
 
-    # Repair slides
+    # Handle slides — may be list, JSON string, or missing
     raw_slides = parsed.get("slides")
-    slides = _repair_slides(raw_slides) if raw_slides else None
+    logger.info(f"RAW SLIDES TYPE: {type(raw_slides).__name__}")
 
-    # Fall back to auto-generated slides if repair failed
+    # If Gemma sent slides as a JSON string, parse it
+    if isinstance(raw_slides, str):
+        logger.info("Slides sent as string — attempting JSON parse")
+        try:
+            raw_slides = json.loads(raw_slides)
+        except Exception:
+            # Try fixing common Gemma JSON mistakes (unquoted keys)
+            import re
+            fixed = re.sub(r'(\w+):', r'"":', raw_slides)
+            try:
+                raw_slides = json.loads(fixed)
+            except Exception:
+                raw_slides = None
+
+    slides = _repair_slides(raw_slides) if raw_slides else None
+    logger.info(f"SLIDES AFTER REPAIR: {len(slides) if slides else 0}")
+
+    # If still no valid slides, log the raw args and use auto-gen with real title
     if not slides:
+        logger.warning(f"No valid slides received. Raw args: {json.dumps({k: str(v)[:200] for k,v in args.items()})}")
         slides = _auto_slides(title, subject)
 
     return create_presentation(json.dumps({
@@ -1176,6 +1197,16 @@ if __name__ == "__main__":
         elif method == "tools/call":
             tool_name = params.get("name", "")
             arguments = params.get("arguments", {})
+            # Log incoming arguments for debugging
+            import logging
+            logging.basicConfig(level=logging.INFO)
+            logger = logging.getLogger("pptx-mcp")
+            logger.info(f"TOOL CALL: {tool_name}")
+            logger.info(f"ARGUMENTS KEYS: {list(arguments.keys())}")
+            logger.info(f"HAS SLIDES: {'slides' in arguments}")
+            if "slides" in arguments:
+                slides_val = arguments["slides"]
+                logger.info(f"SLIDES TYPE: {type(slides_val).__name__}, LEN: {len(slides_val) if hasattr(slides_val,'__len__') else 'N/A'}")
             try:
                 result_text = await call_tool(tool_name, arguments)
                 return JSONResponse({
